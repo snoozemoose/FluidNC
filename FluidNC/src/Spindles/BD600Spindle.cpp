@@ -1,5 +1,6 @@
 // Copyright (c) 2020 -	Bart Dring
 // Copyright (c) 2020 -	Stefan de Bruijn
+// Copyright (c) 2022 -	Peter Newbery
 // Copyright (c) 2024 -	Adam Popanda
 // Use of this source code is governed by a GPLv3 license that can be found in the LICENSE file.
 
@@ -140,12 +141,13 @@ namespace Spindles {
     }
 
     void IRAM_ATTR BD600Spindle::set_speed_command(uint32_t dev_speed, ModbusCommand& data) {
+        // the VFD expects a value in percentage (with two decimal places) relative to the _maxFrequency set in F00.03
+
         if (dev_speed != 0 && (dev_speed < _minFrequency || dev_speed > _maxFrequency)) {
             log_warn(name() << " requested freq " << (dev_speed) << " is outside of range (" << _minFrequency << "," << _maxFrequency << ")");
         }
 
-        // the inverter expects a value in percentage relative to the _maxFrequency set in F00.03
-        uint32_t speed_percentage = (dev_speed / _maxFrequency) * 100 * 100; // percenage, two decimal places
+        uint32_t speed_percentage = (dev_speed / _maxFrequency) * 100 * 100; // percentage, two decimal places
 
         data.tx_length = 6;
         data.rx_length = 6;
@@ -160,164 +162,32 @@ namespace Spindles {
 
     // This gets data from the VFS. It does not set any values
     VFD::response_parser BD600Spindle::initialization_sequence(int index, ModbusCommand& data) {
-        // NOTE: data length is excluding the CRC16 checksum.
-        data.tx_length = 6;
-        data.rx_length = 6;
-
-        // data.msg[0] is omitted (modbus address is filled in later)
-        data.msg[1] = 0x01;  // Read setting
-        data.msg[2] = 0x03;  // Len
-        //      [3] = set below...
-        data.msg[4] = 0x00;
-        data.msg[5] = 0x00;
-
-        switch (index) {
-            case -1:
-                data.msg[3] = 5;  // PD005: max frequency the VFD will allow. Normally 400.
-
-                return [](const uint8_t* response, Spindles::VFD* vfd) -> bool {
-                    uint16_t value = (response[4] << 8) | response[5];
-
-                    // Set current RPM value? Somewhere?
-                    auto bd600Spindle           = static_cast<BD600Spindle*>(vfd);
-                    bd600Spindle ->_maxFrequency = value;
-                    return true;
-                };
-                break;
-            case -2:
-                data.msg[3] = 11;  // PD011: frequency lower limit. Normally 0.
-
-                return [](const uint8_t* response, Spindles::VFD* vfd) -> bool {
-                    uint16_t value = (response[4] << 8) | response[5];
-
-                    // Set current RPM value? Somewhere?
-                    auto bd600Spindle            = static_cast<BD600Spindle*>(vfd);
-                    bd600Spindle ->_minFrequency = value;
-
-                    log_info(bd600Spindle ->name() << " PD0011, PD005 Freq range (" << (bd600Spindle ->_minFrequency / 100) << ","
-                                              << (bd600Spindle ->_maxFrequency / 100) << ") Hz"
-                                              << " (" << (bd600Spindle ->_minFrequency / 100 * 60) << "," << (bd600Spindle ->_maxFrequency / 100 * 60)
-                                              << ") RPM");
-
-                    return true;
-                };
-                break;
-            case -3:
-                data.msg[3] = 144;  // PD144: max rated motor revolution at 50Hz => 24000@400Hz = 3000@50HZ
-
-                return [](const uint8_t* response, Spindles::VFD* vfd) -> bool {
-                    uint16_t value = (response[4] << 8) | response[5];
-
-                    // Set current RPM value? Somewhere?
-                    auto bd600Spindle            = static_cast<BD600Spindle*>(vfd);
-                    bd600Spindle ->_maxRpmAt50Hz = value;
-
-                    log_info(bd600Spindle ->name() << " PD144 Rated RPM @ 50Hz:" << bd600Spindle ->_maxRpmAt50Hz);
-
-                    // Regarding PD144, the 2 versions of the manuals both say "This is set according to the
-                    // actual revolution of the motor. The displayed value is the same as this set value. It
-                    // can be used as a monitoring parameter, which is convenient to the user. This set value
-                    // corresponds to the revolution at 50Hz".
-
-                    // Calculate the VFD settings:
-                    bd600Spindle ->updateRPM();
-
-                    return true;
-                };
-                break;
-            case -4:
-                data.rx_length = 5;
-                data.msg[3]    = 143;  // PD143: 4 or 2 poles in motor. Default is 4. A spindle being 24000RPM@400Hz implies 2 poles
-
-                return [](const uint8_t* response, Spindles::VFD* vfd) -> bool {
-                    uint8_t value    = response[4];  // Single byte response.
-                    auto    bd600Spindle  = static_cast<BD600Spindle*>(vfd);
-                    // Sanity check. We expect something like 2 or 4 poles.
-                    if (value <= 4 && value >= 2) {
-                        // Set current RPM value? Somewhere?
-
-                        bd600Spindle ->_numberPoles = value;
-
-                        log_info(bd600Spindle ->name() << " PD143 Poles:" << bd600Spindle ->_numberPoles);
-
-                        bd600Spindle ->updateRPM();
-
-                        return true;
-                    } else {
-                        log_error(bd600Spindle ->name() << "  PD143 Poles: expected 2-4, got:" << value);
-                        return false;
-                    }
-                };
-                break;
-            case -5:
-                data.msg[3] = 14;  // Accel value displayed is X.X
-
-                return [](const uint8_t* response, Spindles::VFD* vfd) -> bool {
-                    uint16_t value = (response[4] << 8) | response[5];
-
-                    auto bd600Spindle  = static_cast<BD600Spindle*>(vfd);
-                    log_info(bd600Spindle ->name() << " PD014 Accel:" << float(value) / 10.0);
-                    return true;
-                };
-                break;
-            case -6:
-                data.msg[3] = 15;  // Decel alue displayed is X.X
-
-                return [](const uint8_t* response, Spindles::VFD* vfd) -> bool {
-                    uint16_t value = (response[4] << 8) | response[5];
-
-                    auto bd600Spindle  = static_cast<BD600Spindle*>(vfd);
-                    log_info(bd600Spindle ->name() << " PD015 Decel:" << float(value) / 10.0);
-                    return true;
-                };
-                break;
-            default:
-                break;
+        if (_minFrequency > _maxFrequency) {
+            _minFrequency = _maxFrequency;
         }
-
-        // Done.
+        if (_speeds.size() == 0) {
+            //RPM = (Frequency * (360/ Num_Phases))/Num_Poles
+            SpindleSpeed minRPM = (_minFrequency * (360/ _NumberPhases)) / _numberPoles;
+            SpindleSpeed maxRPM = (_maxFrequency * (360/ _NumberPhases)) / _numberPoles;
+            shelfSpeeds(minRPM, maxRPM);
+        }
+        setupSpeeds(_maxFrequency);
+        _slop = std::max(_maxFrequency / 40, 1);
         return nullptr;
     }
 
     void BD600Spindle::updateRPM() {
-        /*
-        PD005 = 400.00 ; max frequency the VFD will allow
-        MaxRPM = PD005 * 60; but see PD176
-
-        Frequencies are expressed in centiHz.
-        */
-
         if (_minFrequency > _maxFrequency) {
             _minFrequency = _maxFrequency;
         }
         if (_speeds.size() == 0) {
             // Convert from Frequency in centiHz (the divisor of 100) to RPM (the factor of 60)
-            SpindleSpeed minRPM = _minFrequency * 60 / 100;
-            SpindleSpeed maxRPM = _maxFrequency * 60 / 100;
+            SpindleSpeed minRPM = (_minFrequency * (360/ _NumberPhases)) / _numberPoles;
+            SpindleSpeed maxRPM = (_maxFrequency * (360/ _NumberPhases)) / _numberPoles;
             shelfSpeeds(minRPM, maxRPM);
         }
         setupSpeeds(_maxFrequency);
         _slop = std::max(_maxFrequency / 40, 1);
-    }
-
-    VFD::response_parser BD600Spindle::get_status_ok(ModbusCommand& data) {
-        // NOTE: data length is excluding the CRC16 checksum.
-        data.tx_length = 6;
-        data.rx_length = 6;
-
-        // data.msg[0] is omitted (modbus address is filled in later)
-        data.msg[1] = 0x04;
-        data.msg[2] = 0x03;
-        data.msg[3] = reg;
-        data.msg[4] = 0x00;
-        data.msg[5] = 0x00;
-
-        if (reg < 0x03) {
-            reg++;
-        } else {
-            reg = 0x00;
-        }
-        return [](const uint8_t* response, Spindles::VFD* vfd) -> bool { return true; };
     }
 
     VFD::response_parser BD600Spindle::get_current_speed(ModbusCommand& data) {
@@ -326,11 +196,11 @@ namespace Spindles {
         data.rx_length = 6;
 
         // data.msg[0] is omitted (modbus address is filled in later)
-        data.msg[1] = 0x04;
-        data.msg[2] = 0x03;
-        data.msg[3] = 0x01;  // Output frequency
+        data.msg[1] = 0x03;
+        data.msg[2] = 0x30;
+        data.msg[3] = 0x01; 
         data.msg[4] = 0x00;
-        data.msg[5] = 0x00;
+        data.msg[5] = 0x02; //read two words from 3001
 
         return [](const uint8_t* response, Spindles::VFD* vfd) -> bool {
             uint16_t frequency = (response[4] << 8) | response[5];
