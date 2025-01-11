@@ -135,7 +135,7 @@ namespace Spindles {
                 data.msg[5] = 0x02;
                 break;
             default:  // SpindleState::Disable
-                data.msg[5] = 0x05;
+                data.msg[5] = 0x06;
                 break;
         }
     }
@@ -147,11 +147,10 @@ namespace Spindles {
             log_warn(name() << " requested freq " << (dev_speed) << " is outside of range (" << _minFrequency << "," << _maxFrequency << ")");
         }
 
-        uint32_t speed_percentage = (dev_speed / _maxFrequency) * 100 * 100; // percentage, two decimal places
+        uint32_t speed_percentage = ((double)dev_speed / _maxFrequency) * 100 * 100; // percentage, two decimal places
 
         data.tx_length = 6;
         data.rx_length = 6;
-       
         // data.msg[0] is omitted (modbus address is filled in later)
         data.msg[1] = 0x06;  // write
         data.msg[2] = 0x30;  // communication setting with source set to Frequency
@@ -193,15 +192,14 @@ namespace Spindles {
     VFD::response_parser BD600Spindle::get_current_speed(ModbusCommand& data) {
         // NOTE: data length is excluding the CRC16 checksum.
         data.tx_length = 6;
-        data.rx_length = 6;
+        data.rx_length = 5;
 
         // data.msg[0] is omitted (modbus address is filled in later)
         data.msg[1] = 0x03;
         data.msg[2] = 0x30;
         data.msg[3] = 0x01; 
         data.msg[4] = 0x00;
-        data.msg[5] = 0x02; //read two words from 3001
-
+        data.msg[5] = 0x14; 
         return [](const uint8_t* response, Spindles::VFD* vfd) -> bool {
             uint16_t frequency = (response[4] << 8) | response[5];
 
